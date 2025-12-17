@@ -1,0 +1,122 @@
+name: Build LineageOS for Miatoll
+
+on:
+  workflow_dispatch:
+    inputs:
+      # По умолчанию LineageOS 20 (Android 13)
+      MANIFEST_URL:
+        description: 'URL манифеста'
+        required: true
+        default: 'https://github.com/LineageOS/android.git'
+      MANIFEST_BRANCH:
+        description: 'Ветка Android'
+        required: true
+        default: 'lineage-20.0'
+      # Цель сборки: bacon (полная прошивка), bootimage (ядро), recoveryimage (рекавери)
+      BUILD_TARGET:
+        description: 'Цель сборки'
+        required: true
+        default: 'bacon' 
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Workflow
+      uses: actions/checkout@v3
+
+    # 1. МАКСИМАЛЬНАЯ ОЧИСТКА (Освобождаем ~60 ГБ)
+    - name: Free up disk space
+      uses: jens-maus/action-free-disk-space@v1
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false
+
+    # 2. УСТАНОВКА ЗАВИСИМОСТЕЙ
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+        
+        # Установка repo
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo "$HOME/bin" >> $GITHUB_PATH
+        
+        # Настройка git
+        git config --global user.name "MiatollBuilder"
+        git config --global user.email "bot@github.com"
+        # Оптимизация git для больших репо
+        git config --global color.ui false
+
+    # 3. ИНИЦИАЛИЗАЦИЯ И ПОДГОТОВКА МАНИФЕСТА
+    - name: Repo Init & Local Manifests
+      run: |
+        mkdir work
+        cd work
+        
+        # Инициализация основного репозитория LineageOS
+        repo init -u ${{ github.event.inputs.MANIFEST_URL }} -b ${{ github.event.inputs.MANIFEST_BRANCH }} --depth=1
+        
+        # Создание локального манифеста специально для MIATOLL
+        # Мы подключаем: Device tree, Kernel, Vendor и Hardware/Xiaomi
+        mkdir -p .repo/local_manifests
+        echo '<?xml version="1.0" encoding="UTF-8"?>
+        <manifest>
+            <remote name="lineage" fetch="https://github.com/LineageOS" />
+            
+            <project path="device/xiaomi/miatoll" name="android_device_xiaomi_miatoll" remote="lineage" revision="lineage-20" />
+            
+            <project path="kernel/xiaomi/sm6250" name="android_kernel_xiaomi_sm6250" remote="lineage" revision="lineage-20" />
+            
+            <project path="vendor/xiaomi/miatoll" name="android_vendor_xiaomi_miatoll" remote="lineage" revision="lineage-20" />
+            
+            <project path="hardware/xiaomi" name="android_hardware_xiaomi" remote="lineage" revision="lineage-20" />
+            
+            </manifest>' > .repo/local_manifests/miatoll.xml
+
+    # 4. СИНХРОНИЗАЦИЯ (Долгая операция)
+    - name: Repo Sync
+      run: |
+        cd work
+        # --force-sync: принудительно
+        # -j$(nproc --all): использовать все ядра
+        # --no-tags: не качать лишние теги
+        # --no-clone-bundle: экономит трафик
+        repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+    # 5. СБОРКА ПРОШИВКИ
+    - name: Build ROM
+      run: |
+        cd work
+        source build/envsetup.sh
+        
+        # Настройка кэша (пытаемся ускорить, если получится)
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        ccache -M 10G
+        
+        # Выбор устройства
+        lunch lineage_miatoll-userdebug
+        
+        # Запуск сборки
+        # Если вы хотите только boot.img, скрипт сработает быстрее
+        mka ${{ github.event.inputs.BUILD_TARGET }}
+
+    # 6. ЗАГРУЗКА АРТЕФАКТОВ
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      if: success()
+      with:
+        name: LineageOS-Miatoll-Build
+        path: |
+          work/out/target/product/miatoll/*.zip
+          work/out/target/product/miatoll/recovery.img
+          work/out/target/product/miatoll/boot.img
