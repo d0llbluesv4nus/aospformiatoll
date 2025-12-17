@@ -19,26 +19,20 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # Лимит времени 6 часов (максимум для GitHub)
     timeout-minutes: 360 
 
     steps:
-    # 1. Используем обновленный Checkout v4
     - name: Checkout Workflow
       uses: actions/checkout@v4
 
-    # 2. Ручная очистка диска (вместо сломанного экшена)
+    # Очистка диска (ручной метод, работает всегда)
     - name: Free up disk space
       run: |
-        echo "Disk space before cleanup:"
-        df -h
         sudo docker image prune -a -f
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/mongodb /usr/local/lib/node_modules
         sudo apt-get clean
-        echo "Disk space after cleanup:"
         df -h
 
-    # 3. Установка инструментов сборки
     - name: Setup Build Environment
       run: |
         sudo apt-get update
@@ -50,11 +44,11 @@ jobs:
         git config --global user.name "MiatollBuilder"
         git config --global user.email "bot@github.com"
 
-    # 4. Инициализация репозитория и локальных манифестов
     - name: Repo Init & Local Manifests
       run: |
         mkdir work
         cd work
+        # Здесь --depth=1 оставляем, это экономит 50ГБ+ места
         repo init -u ${{ github.event.inputs.MANIFEST_URL }} -b ${{ github.event.inputs.MANIFEST_BRANCH }} --depth=1
         
         mkdir -p .repo/local_manifests
@@ -66,13 +60,12 @@ jobs:
             <project path="hardware/xiaomi" name="https://github.com/LineageOS/android_hardware_xiaomi" remote="github" revision="lineage-20" />
         </manifest>' > .repo/local_manifests/miatoll.xml
 
-    # 5. Синхронизация (с ограничением глубины для экономии места)
     - name: Repo Sync
       run: |
         cd work
-        repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --depth=1
+        # Убран флаг --depth отсюда, так как он уже задан в init
+        repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-    # 6. Сборка
     - name: Build ROM
       run: |
         cd work
@@ -83,7 +76,6 @@ jobs:
         lunch lineage_miatoll-userdebug
         mka ${{ github.event.inputs.BUILD_TARGET }}
 
-    # 7. Загрузка результата (используем v4)
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       if: success()
